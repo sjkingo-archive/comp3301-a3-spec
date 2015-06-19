@@ -1,0 +1,6 @@
+*.o
+*.ko
+test.img
+*.txt
+.svn
+*.mod.c

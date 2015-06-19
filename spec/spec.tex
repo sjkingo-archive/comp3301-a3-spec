@@ -1,0 +1,313 @@
+\documentclass[12pt,a4paper]{article}
+
+\input{style.sty}
+
+%% metadata for pdf 
+\newcommand{\pdfsubj}{COMP3301\slash COMP7308}
+\newcommand{\pdftitle}{Assignment 3 --- File systems}
+\newcommand{\pdfauthor}{John Williams and Sam Kingston}
+\newcommand{\assignnum}{a3}
+\newcommand{\assignweight}{20\% }
+\input{hypersetup.tex}
+
+\newcommand{\duedate}{8pm Thursday 27 October 2011}
+
+%% end of preamble
+
+\begin{document}
+
+\input{title.tex}
+
+\begin{center}
+Version 1.0 --- 6 October 2011
+\end{center}
+
+\subsection*{Introduction}
+
+The goal of this assignment is to give you practical experience modifying
+an existing file system for Linux.
+
+You will need to complete the file systems practical before attempting this
+assignment, as it instructs you how to clone the \textit{ext3301} file system
+that you will be using for the assignment.
+
+\input{plag.tex}
+
+\subsection*{Overview}
+
+The assignment is split into two distinct parts. You are required to implement
+both parts in the same file system driver, and they must interact as described
+below.
+
+When loaded, your file system driver should register itself with type
+\textit{ext3301}.
+
+It may be useful to mount any file systems you create with the \texttt{debug}
+mount option while testing. This will cause the module to output extensive
+information to the kernel's ring buffer describing what it is doing. You may
+add new calls to write debugging information out (using the existing
+\textit{ext2} debug calls), but please remove any calls to \texttt{printk()}
+before submitting your assignment (if you added any).
+
+\subsection*{Part A --- Immediate files}
+
+In the unmodified \textit{ext2} file system, regular files are stored in data
+blocks on a block device (often a hard disk). Pointers to these data blocks live
+in the inode structure as single, double and triple indirect pointers. These
+pointers take up 60 bytes of space in the inode, but some (if not all) are
+often unused if the file is small. For more information on the inode structure,
+see the \textit{Documentation/filesystems/ext2.txt} file inside the kernel
+source tree.
+
+Immediate files are a way of storing the contents of a small file directly in
+the inode structure, in the unused block pointers, rather than in data blocks.
+Files up to 60 bytes can have their contents stored in these pointers, and no
+data blocks need to be allocated. Files over 60 bytes cannot fit in the inode,
+so they need to be stored in allocated blocks, and the block pointers need to
+be used to point to these data blocks (just like in the existing \textit{ext2}
+file system).
+
+Your task for this part of the assignment is to implement immediate files in
+the \textit{ext3301} file system. New files should be created as immediate
+files (which have the file type value as specified below), and continue to be immediate
+files until their contents can no longer fit in the inode itself (by growing to
+over 60 bytes). When this happens, the file should be transformed into a
+regular file and its contents be transferred to data blocks (you will need to
+allocate these before transferring). You need to ensure that when this happens
+the block pointers are updated to be valid, so further references to the file
+succeed in accessing the data blocks.
+
+When a file is truncated below 60 bytes, you must convert the file back into an
+immediate file by transferring the contents of its data blocks into the inode
+structure. Ensure you free any data blocks used.
+
+You do not have to implement immediate files for special file types (e.g. block
+device) --- you will not be tested on this.
+
+You cannot modify any code outside of the kernel, and since file types are
+declared in the system header file \texttt{linux/fs.h} (search for \texttt{DT\_REG}),
+you must define a new immediate file type inside your module. Pick a new file type
+number, and define the type in the form of:
+
+\texttt{\#define DT\_IM X}
+
+(where \verb|X| is a unique integer. It is not as simple as picking an unused number;
+you will need to do some testing to see what works.)
+
+Ensure that \texttt{DT\_IM} is defined as specified in one of your source files
+so the marker can recognise an immediate file during marking. It will be
+automatically extraced so you may be penalised if the automated script cannot
+find it.
+
+Note: since we will be modifying parts of how the inode structure is
+represented, the \texttt{e2fsck} tool will probably fail or detect errors when
+there aren't any.  This is expected behaviour and you do not need to worry
+about fixing this.
+
+Your file system implementation must still be able to mount existing
+\textit{ext2} file systems created with the \texttt{mkfs.ext2} tool, so make
+sure you do not modify the inode structure itself (do not add or remove any
+fields, or change the size of the inode).
+
+\subsubsection*{Tips}
+
+\begin{compactitem}
+    \item You can cast the member of the inode structure that stores block
+    pointers to an \texttt{unsigned char *} and use it as a contiguous piece of
+    memory for storing immediate files in. This way you do not have to access the
+    pointer fields directly.
+    \item When a file is marked as immediate, you need to ensure no part of the
+    file system attempts to access the block pointers (since they will effectively
+    contain garbage).
+\end{compactitem}
+
+\subsection*{Part B --- File encryption}
+
+The \textit{ext3301} file system must support a very naive encryption scheme.
+Any files under the \path{/encrypt} directory (if it exists) of a given
+\textit{ext3301} file system need to be encrypted. This will either occur on
+disk (if the file is a regular file), or in the inode structure if the file is
+marked as immediate. Files outside \path{/encrypt} are to remain as plaintext.
+
+Your file system driver must support an extra mount option called \texttt{key}.
+This specifies the encryption key that will be used during encryption and 
+decryption for the given mount of the file system. The key will be given in hex
+format, and you can use \texttt{sscanf()} to parse the option and extract the
+key.  You should only use the 8 least significant bits of the key (meaning it
+can only be in the range \texttt{0x0} to \texttt{0xFF}). If no key option is
+specified at mount time, then the encryption key defaults to \texttt{0x0}
+(which disables encryption) and data should be passed through the file system
+as-is.
+
+It is valid to mount a file system with one key, write some data to it, and
+then remount it with a different key (even though this would result in garbage
+when reading).
+
+Moving a file into the \path{/encrypt} directory should trigger its contents to
+be encrypted, and moving a file outside of this directory should trigger its
+contents to be decrypted (with whatever key the file system is mounted with).
+In Linux, moving a file within the same file system is implemented using a
+link and then an unlink on the inode --- the data blocks are not moved. 
+
+You do not have to handle hard links or symbolic links in this file system.
+
+The encryption algorithm is a simple substitution cipher, where each byte is
+XORed against the key:
+
+Encryption: $C_i = P_i \oplus k$
+
+Decryption: $P_i = C_i \oplus k$
+
+(where $k$ is the encryption key given when mounting the file system.) Note that
+this is a different encryption algorithm from assignment 2.
+
+You should ensure the key does not get written to disk --- it must stay in memory
+at all times (so do not store it in the inode).
+
+\subsection*{Interactions between immediate files and encryption}
+
+Your file system needs to support the different combinations of both immediate
+files and file encryption. For instance it is perfectly valid to have an
+immediate file that is encrypted (and the encrypted data needs to be stored in
+the inode as described above).
+
+\subsection*{Short-response questions}
+
+\begin{enumerate}
+    \item Discuss what happens in your implementation if you attempt to create a symbolic link from:
+    \begin{compactenum}
+        \item outside the encrypted directory to a file inside the directory (for instance \path{/foo} $\rightarrow$ \path{/encrypt/foobar})
+        \item inside the encrypted directory to a file outside it (for instance \path{/encrypt/foobar} $\rightarrow$ \path{/foo})
+    \end{compactenum}
+    Explain why each of these either works or does not work, and explain why.
+
+    \item Discuss what happens in your implementation if you attempt to create a hard link from:
+    \begin{compactenum}
+        \item outside the encrypted directory to a file inside the directory (for instance \path{/foo} $\rightarrow$ \path{/encrypt/foobar})
+        \item inside the encrypted directory to a file outside it (for instance \path{/encrypt/foobar} $\rightarrow$ \path{/foo})
+        \item another file system to a file inside the encrypted directory
+    \end{compactenum}
+    Explain why each of these either works or does not work, and explain why.
+
+    \item What would happen if you run \texttt{e2fsck} over an \textit{ext3301} file system that:
+    \begin{compactenum}
+        \item contains only regular files
+        \item contains only encrypted files
+        \item contains only immediate files
+    \end{compactenum}
+    Discuss the behaviour you see and suggest why this happens.
+\end{enumerate}
+
+\subsection*{Code compilation}
+
+Your implementation must compile as a Linux kernel module (with a \texttt{.ko}
+extension). It must compile and be loadable on the version of the virtual image
+provided on the website. See the kernel module practical for information on
+Makefiles for kernel modules.
+
+Typing \texttt{make} in your \path{a3} repository directory should produce a
+kernel module called \path{a3.ko}.
+
+\input{coding-style.tex}
+
+\input{groupwork.tex}
+
+\input{submission.tex}
+
+\clearpage
+\subsection*{Assessment Criteria}
+
+Marks will be awarded based on the modified scheduling behaviour and the coding
+style used, as well as your responses to the questions above.
+
+\subsubsection*{Functionality (70 marks)}
+
+\begin{longtable}{p{13cm} r}
+    \toprule
+    \textbf{Criteria} & \textbf{Marks available} \\
+
+    \midrule
+    \textbf{Part A --- Immediate files} & \textbf{40 marks} \\
+    New files are created as immediate files with the correct file type & 2 \\
+    Immediate files are able to store between 0 and 60 bytes of data in the inode & 7 \\
+    Writing less than 60 bytes to an immediate file in user-space stores it in the inode & 3 \\
+    Reading to an immediate file in user-space yields the correct data from the inode & 3 \\
+    Writing more than 60 bytes to an immediate file converts it to a regular file and transfers the data to disk & 10 \\
+    Truncating a regular file to under 60 bytes converts it to an immediate file and transfers the data to inode & 10 \\
+    Reading from an existing regular file in user-space yields the correct data & 2 \\
+    Writing to an existing regular file in user-space succeeds & 1 \\
+    Mounting a \textit{ext2} file system image (with only regular files) succeeds & 1 \\
+    No other file types are modified (\textit{e.g.} directory, block device) & 1 \\
+
+    & \\
+    \midrule
+    \textbf{Part B --- File encryption} & \textbf{20 marks} \\
+    \texttt{key} mount option is supported and sets in-memory key for the current mount only & 3 \\
+    Writing to a file inside \path{/encrypt} encrypts the contents with the given non-0 key & 4 \\
+    Reading from a file inside \path{/encrypt} decrypts the contents with the given non-0 key & 4 \\
+    Reading from a file inside \path{/encrypt} when mounted without the \texttt{key} option yields the correct ciphertext & 4 \\
+    Moving a file into \path{/encrypt} encrypts its contents with the given non-0 key & 2 \\
+    Moving a file out of \path{/encrypt} decrypts its contents with the given non-0 key & 2 \\
+    Writing to a file outside of \path{/encrypt} does not modify its inode structure or data blocks & 1 \\
+
+    & \\
+    \midrule
+    \textbf{Part C --- Combination of immediate and encryption} & \textbf{10 marks} \\
+    \multicolumn{2}{l}{\textit{Note that marks in this section are dependant on functionality in Parts A and B}} \\
+    A new immediate file can be written to under \path{/encrypt} and have its encrypted contents stored in the inode & 2 \\
+    An immediate, encrypted file can be read from user-space successfully & 2 \\
+    An immediate, encrypted file can be grown to over 60 bytes and be converted to a regular file & 2 \\
+    A regular, encrypted file can be truncated to under 60 bytes and be converted to an immediate file & 2 \\
+    An immediate, unencrypted file can be moved into \path{/encrypt} and have its contents encrypted & 1 \\
+    An immediate, encrypted file can be moved out of \path{/encrypt} and have its contents decrypted & 1 \\
+
+    \bottomrule
+\end{longtable}
+
+\subsubsection*{Documentation, style and build system (10 marks)}
+
+\begin{longtable}{p{13cm} r}
+    \toprule
+    \textbf{Criteria} & \textbf{Marks available} \\
+
+    \midrule
+    Program builds cleanly with no compiler warnings (1 mark will be
+        deducted per warning up to a maximum of 3) & 3 \\
+    Comments throughout code where appropriate for the marker to understand & 2 \\
+    Coding style follows the Linux kernel coding style document (1 mark will be
+        deducted per violation up to a maximum of 3) & 3 \\
+    Evidence of regular progress through Subversion commit history & 2 \\
+
+    \bottomrule
+\end{longtable}
+
+\subsubsection*{Short-response questions (20 marks)}
+
+Your responses will be assessed for their clarity and completeness, and marks
+will be assigned as follows:
+
+\begin{longtable}{p{13cm} r}
+    \toprule
+    \textbf{Question} & \textbf{Marks available} \\
+    \midrule
+
+    \textbf{1 --- Symbolic links on encrypted file system} & \textbf{4 marks} \\
+    1a: \texttt{/foo} $\rightarrow$ \texttt{/encrypt/foobar} & 2 \\
+    1b: \texttt{/encrypt/foobar} $\rightarrow$ \texttt{/foo} & 2 \\
+
+    & \\
+    \textbf{2 --- Hard links on encrypted file system} & \textbf{7 marks} \\
+    2a: \path{/foo} $\rightarrow$ \path{/encrypt/foobar} & 2 \\
+    2b: \path{/encrypt/foobar} $\rightarrow$ \path{/foo} & 2 \\
+    2c: from another file system to \path{/encrypt/foobar} & 3 \\
+
+    & \\
+    \textbf{3 --- \texttt{e2fsck} on a \textit{ext3301} file system} & \textbf{9 marks} \\
+    3a: containing only regular files & 2 \\
+    3b: containing only encrypted files & 3 \\
+    3c: containing only immediate files & 4 \\
+
+    \bottomrule
+\end{longtable}
+
+\end{document}
